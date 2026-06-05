@@ -14,8 +14,13 @@
 #define ANSI_COLOR_RESET   "\x1b[0m"
 
 #define DEFAULT_DURATION_SECONDS 10
+#define DEFAULT_RUN_COUNT 1
 #define MIN_DURATION_SECONDS 1
 #define MAX_DURATION_SECONDS 3600
+#define MIN_RUN_COUNT 1
+#define MAX_RUN_COUNT 10
+#define MIN_CORE_ID 0
+#define MAX_CORE_ID 255
 #define TEMP_WARNING_DELTA_C 5.0
 #define FREQ_WARNING_DELTA_MHZ 150.0
 #define LOG_PATH_SIZE 128
@@ -99,6 +104,7 @@ static void print_usage(const char *program_name) {
     printf("  %s --demo\n", program_name);
     printf("  %s <binary1> <binary2>\n", program_name);
     printf("  %s --duration <seconds> <binary1> <binary2>\n", program_name);
+    printf("  %s --runs <count> --pin-core <core> <binary1> <binary2>\n", program_name);
     printf("  %s --help\n\n", program_name);
     printf("Demo mode:\n");
     printf("  Running without binary paths opens a menu of built-in testcase pairs.\n");
@@ -112,9 +118,10 @@ static void print_usage(const char *program_name) {
     printf("  %s\n", program_name);
     printf("  %s --demo\n", program_name);
     printf("  %s ./testcases/01_row_major ./testcases/02_col_major\n", program_name);
-    printf("  %s --duration 10 ./testcases/03_bubble_sort ./testcases/04_selection_sort\n\n", program_name);
+    printf("  %s --duration 10 ./testcases/03_bubble_sort ./testcases/04_selection_sort\n", program_name);
+    printf("  %s --runs 5 --pin-core 0 ./testcases/01_row_major ./testcases/02_col_major\n\n", program_name);
     printf("Requirements:\n");
-    printf("  Linux, gcc, make, GNU timeout, and perf.\n");
+    printf("  Linux, gcc, make, GNU timeout, perf, and taskset for --pin-core.\n");
 }
 
 static const char *base_name(const char *path) {
@@ -143,7 +150,7 @@ static void remove_commas(char *str) {
     str[write_index] = '\0';
 }
 
-static int parse_positive_int(const char *text, int *value) {
+static int parse_int_in_range(const char *text, int min_value, int max_value, int *value) {
     char *end = NULL;
     long parsed;
 
@@ -154,12 +161,16 @@ static int parse_positive_int(const char *text, int *value) {
         return 0;
     }
 
-    if (parsed < MIN_DURATION_SECONDS || parsed > MAX_DURATION_SECONDS) {
+    if (parsed < min_value || parsed > max_value) {
         return 0;
     }
 
     *value = (int)parsed;
     return 1;
+}
+
+static int parse_positive_int(const char *text, int *value) {
+    return parse_int_in_range(text, MIN_DURATION_SECONDS, MAX_DURATION_SECONDS, value);
 }
 
 static int command_exit_code(int status) {
@@ -370,10 +381,14 @@ static void print_common_perf_failure_help(void) {
     fprintf(stderr, "  - perf is not installed. Fedora: sudo dnf install perf\n");
     fprintf(stderr, "  - perf_event permissions are restricted. Try running with sudo or adjusting perf_event_paranoid.\n");
     fprintf(stderr, "  - GNU timeout is missing.\n");
+    fprintf(stderr, "  - taskset is missing, if --pin-core is enabled.\n");
     fprintf(stderr, "  - The benchmark binary crashed or does not have execute permission.\n");
 }
 
-static int run_perf_stat(const char *binary_path, const char *log_path, int duration_seconds) {
+static int run_perf_stat(const char *binary_path,
+                         const char *log_path,
+                         int duration_seconds,
+                         int pin_core) {
     char quoted_binary[PATH_MAX + 128];
     char quoted_log[PATH_MAX + 128];
     char command[CMD_SIZE];
@@ -386,12 +401,22 @@ static int run_perf_stat(const char *binary_path, const char *log_path, int dura
         return 0;
     }
 
-    if (snprintf(command, sizeof(command),
-                 "perf stat -e cycles,instructions,branch-misses -o %s "
-                 "timeout %ds %s > /dev/null 2>&1",
-                 quoted_log, duration_seconds, quoted_binary) >= (int)sizeof(command)) {
-        fprintf(stderr, "Error: generated perf command is too long.\n");
-        return 0;
+    if (pin_core >= 0) {
+        if (snprintf(command, sizeof(command),
+                     "perf stat -e cycles,instructions,branch-misses -o %s "
+                     "timeout %ds taskset -c %d %s > /dev/null 2>&1",
+                     quoted_log, duration_seconds, pin_core, quoted_binary) >= (int)sizeof(command)) {
+            fprintf(stderr, "Error: generated perf command is too long.\n");
+            return 0;
+        }
+    } else {
+        if (snprintf(command, sizeof(command),
+                     "perf stat -e cycles,instructions,branch-misses -o %s "
+                     "timeout %ds %s > /dev/null 2>&1",
+                     quoted_log, duration_seconds, quoted_binary) >= (int)sizeof(command)) {
+            fprintf(stderr, "Error: generated perf command is too long.\n");
+            return 0;
+        }
     }
 
     status = system(command);
@@ -406,23 +431,121 @@ static int run_perf_stat(const char *binary_path, const char *log_path, int dura
     return 0;
 }
 
-static int run_benchmark(BenchmarkRun *run, int duration_seconds, int run_number) {
-    printf("[%d/2] Profiling %s for up to %d seconds...\n",
-           run_number, run->binary_path, duration_seconds);
+static void add_metric_sample(PerfMetrics *total,
+                              const PerfMetrics *sample,
+                              int *cycles_count,
+                              int *instructions_count,
+                              int *branch_misses_count,
+                              int *seconds_count) {
+    if (sample->has_cycles) {
+        total->cycles += sample->cycles;
+        (*cycles_count)++;
+    }
 
-    run->before = capture_system_context();
+    if (sample->has_instructions) {
+        total->instructions += sample->instructions;
+        (*instructions_count)++;
+    }
 
-    if (!run_perf_stat(run->binary_path, run->log_path, duration_seconds)) {
+    if (sample->has_branch_misses) {
+        total->branch_misses += sample->branch_misses;
+        (*branch_misses_count)++;
+    }
+
+    if (sample->has_seconds) {
+        total->seconds += sample->seconds;
+        (*seconds_count)++;
+    }
+}
+
+static int finalize_average_metrics(PerfMetrics *metrics,
+                                    int cycles_count,
+                                    int instructions_count,
+                                    int branch_misses_count,
+                                    int seconds_count,
+                                    int run_count) {
+    if (seconds_count != run_count) {
+        fprintf(stderr, "Error: elapsed time was missing from one or more benchmark runs.\n");
         return 0;
     }
 
-    run->after = capture_system_context();
+    metrics->has_seconds = seconds_count > 0;
+    metrics->has_cycles = cycles_count > 0;
+    metrics->has_instructions = instructions_count > 0;
+    metrics->has_branch_misses = branch_misses_count > 0;
 
-    if (!parse_perf_file(run->log_path, &run->metrics)) {
-        return 0;
+    if (metrics->has_cycles) {
+        metrics->cycles = (metrics->cycles + (unsigned long long)(cycles_count / 2)) /
+                          (unsigned long long)cycles_count;
+    }
+
+    if (metrics->has_instructions) {
+        metrics->instructions = (metrics->instructions + (unsigned long long)(instructions_count / 2)) /
+                                (unsigned long long)instructions_count;
+    }
+
+    if (metrics->has_branch_misses) {
+        metrics->branch_misses = (metrics->branch_misses + (unsigned long long)(branch_misses_count / 2)) /
+                                 (unsigned long long)branch_misses_count;
+    }
+
+    if (metrics->has_seconds) {
+        metrics->seconds /= seconds_count;
+    }
+
+    if (metrics->has_cycles && metrics->has_instructions && metrics->cycles > 0) {
+        metrics->ipc = (double)metrics->instructions / (double)metrics->cycles;
+        metrics->has_ipc = 1;
     }
 
     return 1;
+}
+
+static int run_benchmark(BenchmarkRun *run,
+                         int duration_seconds,
+                         int binary_number,
+                         int run_count,
+                         int pin_core) {
+    PerfMetrics totals;
+    int cycles_count = 0;
+    int instructions_count = 0;
+    int branch_misses_count = 0;
+    int seconds_count = 0;
+    int i;
+
+    memset(&totals, 0, sizeof(totals));
+
+    run->before = capture_system_context();
+
+    for (i = 1; i <= run_count; i++) {
+        PerfMetrics sample;
+
+        printf("[%d/2 run %d/%d] Profiling %s for up to %d seconds",
+               binary_number, i, run_count, run->binary_path, duration_seconds);
+        if (pin_core >= 0) {
+            printf(" on CPU core %d", pin_core);
+        }
+        printf("...\n");
+
+        unlink(run->log_path);
+
+        if (!run_perf_stat(run->binary_path, run->log_path, duration_seconds, pin_core)) {
+            return 0;
+        }
+
+        if (!parse_perf_file(run->log_path, &sample)) {
+            return 0;
+        }
+
+        add_metric_sample(&totals, &sample, &cycles_count, &instructions_count,
+                          &branch_misses_count, &seconds_count);
+    }
+
+    run->after = capture_system_context();
+    run->metrics = totals;
+
+    return finalize_average_metrics(&run->metrics, cycles_count, instructions_count,
+                                    branch_misses_count, seconds_count, run_count);
 }
 
 static void format_ull_metric(int available, unsigned long long value, char *buffer, size_t buffer_size) {
@@ -741,7 +864,7 @@ static int read_menu_int(const char *prompt, int default_value, int min_value, i
         return 1;
     }
 
-    if (!parse_positive_int(line, &parsed) || parsed < min_value || parsed > max_value) {
+    if (!parse_int_in_range(line, min_value, max_value, &parsed)) {
         return 0;
     }
 
@@ -749,9 +872,15 @@ static int read_menu_int(const char *prompt, int default_value, int min_value, i
     return 1;
 }
 
-static int choose_demo_pair(int *duration_seconds, const char **binary1, const char **binary2) {
+static int choose_demo_pair(int *duration_seconds,
+                            int *run_count,
+                            int *pin_core,
+                            const char **binary1,
+                            const char **binary2) {
     int choice;
     int selected_duration;
+    int selected_runs;
+    int selected_pin_core;
     size_t i;
 
     printf("CLI Tool For Relative Benchmarking\n");
@@ -775,13 +904,31 @@ static int choose_demo_pair(int *duration_seconds, const char **binary1, const c
         return 0;
     }
 
+    if (!read_menu_int("Number of runs to average [1]: ", DEFAULT_RUN_COUNT,
+                       MIN_RUN_COUNT, MAX_RUN_COUNT, &selected_runs)) {
+        fprintf(stderr, "Error: invalid run count.\n");
+        return 0;
+    }
+
+    if (!read_menu_int("Pin to CPU core (-1 for no pinning) [-1]: ", -1,
+                       -1, MAX_CORE_ID, &selected_pin_core)) {
+        fprintf(stderr, "Error: invalid CPU core.\n");
+        return 0;
+    }
+
     *duration_seconds = selected_duration;
+    *run_count = selected_runs;
+    *pin_core = selected_pin_core;
     *binary1 = DEMO_PAIRS[choice - 1].binary1;
     *binary2 = DEMO_PAIRS[choice - 1].binary2;
 
     printf("\nSelected: %s\n", DEMO_PAIRS[choice - 1].title);
-    printf("Command equivalent: ./perfcmp --duration %d %s %s\n\n",
-           *duration_seconds, *binary1, *binary2);
+    printf("Command equivalent: ./perfcmp --duration %d --runs %d",
+           *duration_seconds, *run_count);
+    if (*pin_core >= 0) {
+        printf(" --pin-core %d", *pin_core);
+    }
+    printf(" %s %s\n\n", *binary1, *binary2);
 
     return 1;
 }
@@ -789,6 +936,8 @@ static int choose_demo_pair(int *duration_seconds, const char **binary1, const c
 static int parse_arguments(int argc,
                            char *argv[],
                            int *duration_seconds,
+                           int *run_count,
+                           int *pin_core,
                            const char **binary1,
                            const char **binary2) {
     int i;
@@ -797,6 +946,8 @@ static int parse_arguments(int argc,
     int demo_mode = 0;
 
     *duration_seconds = DEFAULT_DURATION_SECONDS;
+    *run_count = DEFAULT_RUN_COUNT;
+    *pin_core = -1;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -808,6 +959,22 @@ static int parse_arguments(int argc,
             if (i + 1 >= argc || !parse_positive_int(argv[i + 1], duration_seconds)) {
                 fprintf(stderr, "Error: --duration requires an integer from %d to %d seconds.\n",
                         MIN_DURATION_SECONDS, MAX_DURATION_SECONDS);
+                return 0;
+            }
+            i++;
+        } else if (strcmp(argv[i], "--runs") == 0) {
+            if (i + 1 >= argc ||
+                !parse_int_in_range(argv[i + 1], MIN_RUN_COUNT, MAX_RUN_COUNT, run_count)) {
+                fprintf(stderr, "Error: --runs requires an integer from %d to %d.\n",
+                        MIN_RUN_COUNT, MAX_RUN_COUNT);
+                return 0;
+            }
+            i++;
+        } else if (strcmp(argv[i], "--pin-core") == 0) {
+            if (i + 1 >= argc ||
+                !parse_int_in_range(argv[i + 1], MIN_CORE_ID, MAX_CORE_ID, pin_core)) {
+                fprintf(stderr, "Error: --pin-core requires an integer from %d to %d.\n",
+                        MIN_CORE_ID, MAX_CORE_ID);
                 return 0;
             }
             i++;
@@ -826,7 +993,7 @@ static int parse_arguments(int argc,
     }
 
     if (demo_mode || binary_count == 0) {
-        return choose_demo_pair(duration_seconds, binary1, binary2);
+        return choose_demo_pair(duration_seconds, run_count, pin_core, binary1, binary2);
     }
 
     if (binary_count != 2) {
@@ -842,6 +1009,8 @@ static int parse_arguments(int argc,
 
 int main(int argc, char *argv[]) {
     int duration_seconds;
+    int run_count;
+    int pin_core;
     const char *binary1;
     const char *binary2;
     char log1[LOG_PATH_SIZE];
@@ -850,7 +1019,8 @@ int main(int argc, char *argv[]) {
     BenchmarkRun run2;
     int success = 0;
 
-    if (!parse_arguments(argc, argv, &duration_seconds, &binary1, &binary2)) {
+    if (!parse_arguments(argc, argv, &duration_seconds, &run_count,
+                         &pin_core, &binary1, &binary2)) {
         return 1;
     }
 
@@ -871,6 +1041,20 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    if (pin_core >= 0 && !shell_command_succeeds("command -v taskset > /dev/null 2>&1")) {
+        fprintf(stderr, "Error: --pin-core requires taskset, but taskset is not available on PATH.\n");
+        fprintf(stderr, "Install util-linux or run without --pin-core.\n");
+        return 1;
+    }
+
+    printf("Benchmark settings: duration=%d seconds, runs=%d", duration_seconds, run_count);
+    if (pin_core >= 0) {
+        printf(", pinned_core=%d", pin_core);
+    } else {
+        printf(", pinned_core=disabled");
+    }
+    printf("\n");
+
     snprintf(log1, sizeof(log1), ".perfcmp_perf_%ld_1.log", (long)getpid());
     snprintf(log2, sizeof(log2), ".perfcmp_perf_%ld_2.log", (long)getpid());
     unlink(log1);
@@ -887,8 +1071,8 @@ int main(int argc, char *argv[]) {
     run2.display_name = base_name(binary2);
     run2.log_path = log2;
 
-    if (run_benchmark(&run1, duration_seconds, 1) &&
-        run_benchmark(&run2, duration_seconds, 2)) {
+    if (run_benchmark(&run1, duration_seconds, 1, run_count, pin_core) &&
+        run_benchmark(&run2, duration_seconds, 2, run_count, pin_core)) {
         print_metric_table(&run1, &run2);
         print_system_context_table(&run1, &run2);
         print_verdict(&run1, &run2);

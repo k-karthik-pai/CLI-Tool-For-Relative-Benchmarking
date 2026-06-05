@@ -25,13 +25,13 @@ Install the common tools on Ubuntu/Debian:
 
 ```sh
 sudo apt update
-sudo apt install gcc make linux-tools-common linux-tools-generic
+sudo apt install gcc make linux-tools-common linux-tools-generic util-linux
 ```
 
 On Fedora:
 
 ```sh
-sudo dnf install gcc make perf
+sudo dnf install gcc make perf util-linux
 ```
 
 If `perf` cannot access hardware counters, run with `sudo` or check:
@@ -66,11 +66,16 @@ The testcase binaries are built inside `testcases/`.
 ./perfcmp --demo
 ./perfcmp <binary1> <binary2>
 ./perfcmp --duration 10 <binary1> <binary2>
+./perfcmp --runs 5 --pin-core 0 <binary1> <binary2>
 ./perfcmp --help
 ```
 
 Running `./perfcmp` opens a menu of built-in testcase pairs. Use the full
 binary-path form only when you want to benchmark your own new programs.
+
+Use `--runs` to repeat each benchmark and report averaged metrics. Use
+`--pin-core` to run each benchmark on one CPU core through `taskset`, reducing
+noise from process migration.
 
 Example demo commands:
 
@@ -81,6 +86,7 @@ Example demo commands:
 ./perfcmp --duration 10 ./testcases/03_bubble_sort ./testcases/04_selection_sort
 ./perfcmp --duration 10 ./testcases/05_without_prefetch ./testcases/06_with_prefetch
 ./perfcmp --duration 10 ./testcases/07_malloc_alloc ./testcases/08_stack_alloc
+./perfcmp --duration 10 --runs 5 --pin-core 0 ./testcases/01_row_major ./testcases/02_col_major
 ```
 
 ## Testcase Pairs
@@ -121,9 +127,13 @@ Select a built-in benchmark pair:
 
 Enter choice [1-4]: 1
 Duration in seconds [10]: 10
+Number of runs to average [1]: 5
+Pin to CPU core (-1 for no pinning) [-1]: 0
 
-[1/2] Profiling ./testcases/01_row_major for up to 10 seconds...
-[2/2] Profiling ./testcases/02_col_major for up to 10 seconds...
+[1/2 run 1/5] Profiling ./testcases/01_row_major for up to 10 seconds on CPU core 0...
+[1/2 run 2/5] Profiling ./testcases/01_row_major for up to 10 seconds on CPU core 0...
+...
+[2/2 run 5/5] Profiling ./testcases/02_col_major for up to 10 seconds on CPU core 0...
 
 ==============================================================================
                        BENCHMARK PERFORMANCE COMPARISON
@@ -154,3 +164,4 @@ Actual numbers depend on the CPU, OS, cooling, and background processes.
 - Hardware counters may need permission changes or `sudo`.
 - Benchmark values vary across machines, CPU governors, and background load.
 - Thermal/frequency values may show `N/A` if the Linux system does not expose them.
+- `--pin-core` requires `taskset`, usually provided by the `util-linux` package.
