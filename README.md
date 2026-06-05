@@ -14,7 +14,7 @@ using real performance counters from `perf`.
 - Collect elapsed time, CPU cycles, instructions, and branch misses.
 - Calculate IPC, which means instructions per cycle.
 - Show percentage differences relative to the first binary.
-- Give a careful verdict without forcing a winner when results are mixed.
+- Give a careful verdict, including an inconclusive result when metrics are close or split.
 - Report CPU temperature and frequency as fairness context only.
 
 ## Linux Requirements
@@ -26,6 +26,12 @@ Install the common tools on Ubuntu/Debian:
 ```sh
 sudo apt update
 sudo apt install gcc make linux-tools-common linux-tools-generic
+```
+
+On Fedora:
+
+```sh
+sudo dnf install gcc make perf
 ```
 
 If `perf` cannot access hardware counters, run with `sudo` or check:
@@ -94,6 +100,7 @@ Example demo commands:
 - **IPC:** Instructions per cycle. Higher often indicates better CPU pipeline utilization.
 - **Branch Misses:** Failed branch predictions. Lower usually means less wasted speculative work.
 - **Temperature/Frequency:** Fairness indicators only. They are not used to normalize the final score because CPU thermal behavior is non-linear and hardware-dependent.
+- **Frequency Context:** The verdict reports observed CPU frequency when available, because turbo boost or throttling can affect timing.
 
 ## Why Temperature Is Not Used For Normalization
 

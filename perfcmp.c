@@ -111,7 +111,7 @@ static void print_usage(const char *program_name) {
     printf("  %s ./testcases/01_row_major ./testcases/02_col_major\n", program_name);
     printf("  %s --duration 10 ./testcases/03_bubble_sort ./testcases/04_selection_sort\n\n", program_name);
     printf("Requirements:\n");
-    printf("  Linux, gcc, GNU timeout, and perf from linux-tools.\n");
+    printf("  Linux, gcc, make, GNU timeout, and perf.\n");
 }
 
 static const char *base_name(const char *path) {
@@ -363,7 +363,8 @@ static int parse_perf_file(const char *filename, PerfMetrics *metrics) {
 
 static void print_common_perf_failure_help(void) {
     fprintf(stderr, "\nCommon causes:\n");
-    fprintf(stderr, "  - perf is not installed. Try: sudo apt install linux-tools-common linux-tools-generic\n");
+    fprintf(stderr, "  - perf is not installed. Ubuntu: sudo apt install linux-tools-common linux-tools-generic\n");
+    fprintf(stderr, "  - perf is not installed. Fedora: sudo dnf install perf\n");
     fprintf(stderr, "  - perf_event permissions are restricted. Try running with sudo or adjusting perf_event_paranoid.\n");
     fprintf(stderr, "  - GNU timeout is missing.\n");
     fprintf(stderr, "  - The benchmark binary crashed or does not have execute permission.\n");
@@ -383,8 +384,8 @@ static int run_perf_stat(const char *binary_path, const char *log_path, int dura
     }
 
     if (snprintf(command, sizeof(command),
-                 "perf stat -e cycles,instructions,branch-misses -o %s -- "
-                 "timeout %ds -- %s > /dev/null 2>&1",
+                 "perf stat -e cycles,instructions,branch-misses -o %s "
+                 "timeout %ds %s > /dev/null 2>&1",
                  quoted_log, duration_seconds, quoted_binary) >= (int)sizeof(command)) {
         fprintf(stderr, "Error: generated perf command is too long.\n");
         return 0;
@@ -614,7 +615,7 @@ static void print_metric_explanations(void) {
     printf("  Instructions : Number of executed instructions. Lower can indicate a smaller work path.\n");
     printf("  IPC          : Instructions per cycle. Higher often means better CPU pipeline use.\n");
     printf("  Branch Misses: Failed branch predictions. Lower usually means less wasted work.\n");
-    printf("  Temp/Freq    : Fairness context only; temperature is not used to normalize scores.\n");
+    printf("  Temp/Freq    : Fairness context only; temperature/frequency do not normalize scores.\n");
 }
 
 static void print_verdict(const BenchmarkRun *run1, const BenchmarkRun *run2) {
@@ -656,7 +657,7 @@ static void print_verdict(const BenchmarkRun *run1, const BenchmarkRun *run2) {
         printf("  %s is the stronger relative performer (score %.1f vs %.1f).\n",
                run2->display_name, score2, score1);
     } else {
-        printf("  Results are close or mixed (score %.1f vs %.1f); no forced winner.\n",
+        printf("  Result is inconclusive: performance is close or split across metrics (score %.1f vs %.1f).\n",
                score1, score2);
     }
 
@@ -670,6 +671,26 @@ static void print_verdict(const BenchmarkRun *run1, const BenchmarkRun *run2) {
         } else {
             printf("  Primary reason: elapsed time is within a close margin, so supporting metrics matter.\n");
         }
+    }
+
+    if (run1->before.has_frequency && run1->after.has_frequency &&
+        run2->before.has_frequency && run2->after.has_frequency) {
+        double avg_freq1 = (run1->before.frequency_mhz + run1->after.frequency_mhz) / 2.0;
+        double avg_freq2 = (run2->before.frequency_mhz + run2->after.frequency_mhz) / 2.0;
+        double freq_delta = avg_freq2 - avg_freq1;
+
+        printf("  Frequency context: average observed CPU frequency was %.1f MHz for %s and %.1f MHz for %s.\n",
+               avg_freq1, run1->display_name, avg_freq2, run2->display_name);
+
+        if (freq_delta > 100.0) {
+            printf("  Note: %s ran with a noticeably higher observed CPU frequency, which may influence timing.\n",
+                   run2->display_name);
+        } else if (freq_delta < -100.0) {
+            printf("  Note: %s ran with a noticeably higher observed CPU frequency, which may influence timing.\n",
+                   run1->display_name);
+        }
+    } else {
+        printf("  Frequency context: CPU frequency was unavailable on this system.\n");
     }
 }
 

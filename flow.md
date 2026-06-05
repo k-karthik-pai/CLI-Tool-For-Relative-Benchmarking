@@ -2,6 +2,21 @@
 
 ## Build Everything
 
+Ubuntu/Debian dependencies:
+
+```sh
+sudo apt update
+sudo apt install gcc make linux-tools-common linux-tools-generic
+```
+
+Fedora dependencies:
+
+```sh
+sudo dnf install gcc make perf
+```
+
+Build:
+
 ```sh
 make clean
 make
