@@ -1,0 +1,16 @@
+# Generated executables
+/perfcmp
+/a.out
+/testcases/01_row_major
+/testcases/02_col_major
+/testcases/03_bubble_sort
+/testcases/04_selection_sort
+/testcases/05_without_prefetch
+/testcases/06_with_prefetch
+/testcases/07_malloc_alloc
+/testcases/08_stack_alloc
+*.exe
+
+# Temporary perf logs
+/.perfcmp_perf_*.log
+/.perf_log*.txt
