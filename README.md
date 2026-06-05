@@ -100,7 +100,7 @@ Example demo commands:
 - **IPC:** Instructions per cycle. Higher often indicates better CPU pipeline utilization.
 - **Branch Misses:** Failed branch predictions. Lower usually means less wasted speculative work.
 - **Temperature/Frequency:** Fairness indicators only. They are not used to normalize the final score because CPU thermal behavior is non-linear and hardware-dependent.
-- **Frequency Context:** The verdict reports observed CPU frequency when available, because turbo boost or throttling can affect timing.
+- **Frequency Context:** The system-context table reports observed CPU frequency when available. A warning appears only when one run has a noticeably higher average frequency.
 
 ## Why Temperature Is Not Used For Normalization
 
@@ -125,17 +125,17 @@ Duration in seconds [10]: 10
 [1/2] Profiling ./testcases/01_row_major for up to 10 seconds...
 [2/2] Profiling ./testcases/02_col_major for up to 10 seconds...
 
-=========================================================================
+==============================================================================
                        BENCHMARK PERFORMANCE COMPARISON
-=========================================================================
+==============================================================================
 Metric               | 01_row_major       | 02_col_major       | Diff % vs 1st
--------------------------------------------------------------------------
+==============================================================================
 Time Elapsed (s)     | 0.1200             | 0.3500             | +191.7%
 CPU Cycles           | 400000000          | 1100000000         | +175.0%
 Instructions         | 90000000           | 90000000           | +0.0%
 IPC                  | 0.23               | 0.08               | -65.2%
 Branch Misses        | 2000               | 2500               | +25.0%
-=========================================================================
+==============================================================================
 ```
 
 Actual numbers depend on the CPU, OS, cooling, and background processes.

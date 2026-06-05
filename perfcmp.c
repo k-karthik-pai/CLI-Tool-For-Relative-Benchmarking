@@ -17,8 +17,11 @@
 #define MIN_DURATION_SECONDS 1
 #define MAX_DURATION_SECONDS 3600
 #define TEMP_WARNING_DELTA_C 5.0
+#define FREQ_WARNING_DELTA_MHZ 150.0
 #define LOG_PATH_SIZE 128
 #define CMD_SIZE 2048
+#define METRIC_TABLE_LINE "=============================================================================="
+#define CONTEXT_TABLE_LINE "=============================================================================================="
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -477,12 +480,12 @@ static void print_metric_table(const BenchmarkRun *run1, const BenchmarkRun *run
     char value1[64];
     char value2[64];
 
-    printf("\n=========================================================================\n");
-    printf("                       BENCHMARK PERFORMANCE COMPARISON                  \n");
-    printf("=========================================================================\n");
-    printf("%-20s | %-18.18s | %-18.18s | %-12s\n",
+    printf("\n%s\n", METRIC_TABLE_LINE);
+    printf("                         BENCHMARK PERFORMANCE COMPARISON                 \n");
+    printf("%s\n", METRIC_TABLE_LINE);
+    printf("%-20s | %-18.18s | %-18.18s | %-13s\n",
            "Metric", run1->display_name, run2->display_name, "Diff % vs 1st");
-    printf("-------------------------------------------------------------------------\n");
+    printf("%s\n", METRIC_TABLE_LINE);
 
     format_double_metric(run1->metrics.has_seconds, run1->metrics.seconds, 4, value1, sizeof(value1));
     format_double_metric(run2->metrics.has_seconds, run2->metrics.seconds, 4, value2, sizeof(value2));
@@ -514,43 +517,56 @@ static void print_metric_table(const BenchmarkRun *run1, const BenchmarkRun *run
                      run1->metrics.has_branch_misses && run2->metrics.has_branch_misses,
                      (double)run1->metrics.branch_misses, (double)run2->metrics.branch_misses, 1);
 
-    printf("=========================================================================\n");
+    printf("%s\n", METRIC_TABLE_LINE);
 }
 
-static void print_context_value(int available, double value, const char *suffix) {
+static void format_context_value(int available,
+                                 double value,
+                                 const char *suffix,
+                                 char *buffer,
+                                 size_t buffer_size) {
     if (available) {
-        printf("%.1f %s", value, suffix);
+        snprintf(buffer, buffer_size, "%.1f %s", value, suffix);
     } else {
-        printf("N/A");
+        snprintf(buffer, buffer_size, "N/A");
     }
 }
 
 static void print_system_context_table(const BenchmarkRun *run1, const BenchmarkRun *run2) {
+    char temp_before[32];
+    char temp_after[32];
+    char freq_before[32];
+    char freq_after[32];
+
     printf("\nSystem Context (fairness indicators, not score normalization)\n");
-    printf("-------------------------------------------------------------------------\n");
+    printf("%s\n", CONTEXT_TABLE_LINE);
     printf("%-18s | %-16s | %-16s | %-16s | %-16s\n",
            "Binary", "Temp Before", "Temp After", "Freq Before", "Freq After");
-    printf("-------------------------------------------------------------------------\n");
+    printf("%s\n", CONTEXT_TABLE_LINE);
 
-    printf("%-18.18s | ", run1->display_name);
-    print_context_value(run1->before.has_temperature, run1->before.temperature_c, "C");
-    printf("       | ");
-    print_context_value(run1->after.has_temperature, run1->after.temperature_c, "C");
-    printf("       | ");
-    print_context_value(run1->before.has_frequency, run1->before.frequency_mhz, "MHz");
-    printf("    | ");
-    print_context_value(run1->after.has_frequency, run1->after.frequency_mhz, "MHz");
-    printf("\n");
+    format_context_value(run1->before.has_temperature, run1->before.temperature_c,
+                         "C", temp_before, sizeof(temp_before));
+    format_context_value(run1->after.has_temperature, run1->after.temperature_c,
+                         "C", temp_after, sizeof(temp_after));
+    format_context_value(run1->before.has_frequency, run1->before.frequency_mhz,
+                         "MHz", freq_before, sizeof(freq_before));
+    format_context_value(run1->after.has_frequency, run1->after.frequency_mhz,
+                         "MHz", freq_after, sizeof(freq_after));
+    printf("%-18.18s | %-16s | %-16s | %-16s | %-16s\n",
+           run1->display_name, temp_before, temp_after, freq_before, freq_after);
 
-    printf("%-18.18s | ", run2->display_name);
-    print_context_value(run2->before.has_temperature, run2->before.temperature_c, "C");
-    printf("       | ");
-    print_context_value(run2->after.has_temperature, run2->after.temperature_c, "C");
-    printf("       | ");
-    print_context_value(run2->before.has_frequency, run2->before.frequency_mhz, "MHz");
-    printf("    | ");
-    print_context_value(run2->after.has_frequency, run2->after.frequency_mhz, "MHz");
-    printf("\n");
+    format_context_value(run2->before.has_temperature, run2->before.temperature_c,
+                         "C", temp_before, sizeof(temp_before));
+    format_context_value(run2->after.has_temperature, run2->after.temperature_c,
+                         "C", temp_after, sizeof(temp_after));
+    format_context_value(run2->before.has_frequency, run2->before.frequency_mhz,
+                         "MHz", freq_before, sizeof(freq_before));
+    format_context_value(run2->after.has_frequency, run2->after.frequency_mhz,
+                         "MHz", freq_after, sizeof(freq_after));
+    printf("%-18.18s | %-16s | %-16s | %-16s | %-16s\n",
+           run2->display_name, temp_before, temp_after, freq_before, freq_after);
+
+    printf("%s\n", CONTEXT_TABLE_LINE);
 
     if (run1->before.has_temperature && run2->before.has_temperature &&
         run2->before.temperature_c > run1->before.temperature_c + TEMP_WARNING_DELTA_C) {
@@ -560,8 +576,33 @@ static void print_system_context_table(const BenchmarkRun *run1, const Benchmark
                run2->before.temperature_c - run1->before.temperature_c);
     }
 
-    if (!run1->before.has_temperature || !run2->before.has_temperature) {
+    if (run1->before.has_frequency && run1->after.has_frequency &&
+        run2->before.has_frequency && run2->after.has_frequency) {
+        double avg_freq1 = (run1->before.frequency_mhz + run1->after.frequency_mhz) / 2.0;
+        double avg_freq2 = (run2->before.frequency_mhz + run2->after.frequency_mhz) / 2.0;
+        double freq_delta = avg_freq2 - avg_freq1;
+
+        if (freq_delta > FREQ_WARNING_DELTA_MHZ) {
+            printf(ANSI_COLOR_YELLOW
+                   "Warning: %s ran with %.1f MHz higher average observed CPU frequency; timing may be biased.\n"
+                   ANSI_COLOR_RESET,
+                   run2->display_name, freq_delta);
+        } else if (freq_delta < -FREQ_WARNING_DELTA_MHZ) {
+            printf(ANSI_COLOR_YELLOW
+                   "Warning: %s ran with %.1f MHz higher average observed CPU frequency; timing may be biased.\n"
+                   ANSI_COLOR_RESET,
+                   run1->display_name, -freq_delta);
+        }
+    }
+
+    if (!run1->before.has_temperature || !run1->after.has_temperature ||
+        !run2->before.has_temperature || !run2->after.has_temperature) {
         printf("Note: CPU temperature was unavailable on this Linux system.\n");
+    }
+
+    if (!run1->before.has_frequency || !run1->after.has_frequency ||
+        !run2->before.has_frequency || !run2->after.has_frequency) {
+        printf("Note: CPU frequency was unavailable on this Linux system.\n");
     }
 }
 
@@ -673,25 +714,6 @@ static void print_verdict(const BenchmarkRun *run1, const BenchmarkRun *run2) {
         }
     }
 
-    if (run1->before.has_frequency && run1->after.has_frequency &&
-        run2->before.has_frequency && run2->after.has_frequency) {
-        double avg_freq1 = (run1->before.frequency_mhz + run1->after.frequency_mhz) / 2.0;
-        double avg_freq2 = (run2->before.frequency_mhz + run2->after.frequency_mhz) / 2.0;
-        double freq_delta = avg_freq2 - avg_freq1;
-
-        printf("  Frequency context: average observed CPU frequency was %.1f MHz for %s and %.1f MHz for %s.\n",
-               avg_freq1, run1->display_name, avg_freq2, run2->display_name);
-
-        if (freq_delta > 100.0) {
-            printf("  Note: %s ran with a noticeably higher observed CPU frequency, which may influence timing.\n",
-                   run2->display_name);
-        } else if (freq_delta < -100.0) {
-            printf("  Note: %s ran with a noticeably higher observed CPU frequency, which may influence timing.\n",
-                   run1->display_name);
-        }
-    } else {
-        printf("  Frequency context: CPU frequency was unavailable on this system.\n");
-    }
 }
 
 static void trim_newline(char *text) {
