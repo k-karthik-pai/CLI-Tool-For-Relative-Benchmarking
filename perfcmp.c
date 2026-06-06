@@ -471,7 +471,7 @@ static int quote_shell_arg(const char *input, char *output, size_t output_size) 
 
 /*
  * read_temperature_c — Reads the average CPU temperature from the Linux
- * sysfs thermal zone interface (/sys/class/thermal/thermal_zone*/temp).
+ * sysfs thermal zone interface (/sys/class/thermal/thermal_zone[0-5]/temp).
  * Iterates over zones 0–5, averaging all valid readings.  Values reported
  * in millidegrees (>1000) are converted to degrees Celsius.
  *
