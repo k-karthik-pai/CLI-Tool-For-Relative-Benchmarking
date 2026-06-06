@@ -67,7 +67,11 @@ The testcase binaries are built inside `testcases/`.
 ./perfcmp <binary1> <binary2>
 ./perfcmp --duration 10 <binary1> <binary2>
 ./perfcmp --runs 5 --pin-core 0 <binary1> <binary2>
+./perfcmp --cooldown <seconds> <binary1> <binary2>
+./perfcmp --auto-cooldown <binary1> <binary2>
 ./perfcmp --help
+./perfcmp --scaling <binary1> <binary2>
+./perfcmp --scaling --sizes <n1,n2,...> <binary1> <binary2>
 ```
 
 Running `./perfcmp` opens a menu of built-in testcase pairs. Use the full
@@ -87,6 +91,16 @@ Example demo commands:
 ./perfcmp --duration 10 ./testcases/05_without_prefetch ./testcases/06_with_prefetch
 ./perfcmp --duration 10 ./testcases/07_malloc_alloc ./testcases/08_stack_alloc
 ./perfcmp --duration 10 --runs 5 --pin-core 0 ./testcases/01_row_major ./testcases/02_col_major
+./perfcmp --runs 3 --cooldown 10 ./testcases/03_bubble_sort ./testcases/04_selection_sort
+./perfcmp --runs 3 --auto-cooldown ./testcases/01_row_major ./testcases/02_col_major
+```
+
+Scaling analysis examples:
+
+```sh
+./perfcmp --scaling ./testcases/03_bubble_sort ./testcases/04_selection_sort
+./perfcmp --scaling --sizes 1000,2000,4000,8000 ./testcases/01_row_major ./testcases/02_col_major
+./perfcmp --scaling --duration 5 --runs 3 ./testcases/07_malloc_alloc ./testcases/08_stack_alloc
 ```
 
 ## Testcase Pairs
@@ -98,6 +112,86 @@ Example demo commands:
 | Without prefetch vs with prefetch | Memory access hinting | Software prefetch can help in some patterns, but results are hardware-dependent. |
 | Heap vs stack allocation | Allocation overhead | Stack allocation avoids repeated `malloc` and `free` bookkeeping. |
 
+## Thermal Cooldown
+
+CPU temperature rises during benchmarking, which can cause thermal throttling
+and bias results. perfcmp provides two cooldown modes to mitigate this.
+
+### Fixed Cooldown (`--cooldown <seconds>`)
+
+Sleeps for a fixed number of seconds after the warm-up pass and between each
+measurement run. Default is 5 seconds. Set to 0 to disable.
+
+```sh
+./perfcmp --runs 3 --cooldown 10 ./testcases/03_bubble_sort ./testcases/04_selection_sort
+```
+
+### Auto-Cooldown (`--auto-cooldown`)
+
+Records a baseline CPU temperature after the warm-up pass, then polls the
+temperature sensor every 5 seconds before each subsequent run. The benchmark
+only proceeds once the CPU temperature drops back within 1.0°C of the baseline,
+or after a 300-second timeout.
+
+```sh
+./perfcmp --runs 3 --auto-cooldown ./testcases/01_row_major ./testcases/02_col_major
+```
+
+If no temperature sensor is available (common in VMs or WSL), auto-cooldown
+falls back to the default fixed cooldown of 5 seconds with a warning.
+
+`--cooldown` and `--auto-cooldown` are mutually exclusive.
+
+## Empirical Scaling Analysis
+
+The `--scaling` flag enables empirical Big O complexity estimation. Instead of
+comparing two binaries at a single fixed input size, scaling mode runs each
+binary at multiple input sizes and fits the observed runtime growth to known
+complexity classes.
+
+### How It Works
+
+1. Each test binary accepts an optional `argv[1]` to set the input size N.
+2. `--scaling` runs both binaries at several N values (5 by default).
+3. A log-log linear regression on (N, Time) data points yields the power
+   exponent: if Time ≈ c·N^k, then k is the slope on a log-log plot.
+4. The exponent is classified into O(1), O(N), O(N log N), O(N²), or O(N³).
+5. An R² (coefficient of determination) measures how well the data fits the
+   model. Values close to 1.0 indicate a strong fit.
+
+### Custom Sizes
+
+Use `--sizes` to provide your own comma-separated list of N values:
+
+```sh
+./perfcmp --scaling --sizes 500,1000,2000,4000,8000 ./testcases/03_bubble_sort ./testcases/04_selection_sort
+```
+
+Without `--sizes`, the tool uses sensible defaults per demo pair or a generic
+geometric sequence (1000, 2000, 4000, 8000, 16000) for custom binaries.
+
+### Sample Scaling Output
+
+```text
+==============================================================================
+                       EMPIRICAL SCALING ANALYSIS
+==============================================================================
+N            | 03_bubble_sort       | 04_selection_sort
+==============================================================================
+2000         | 0.012800             | 0.011200
+4000         | 0.051000             | 0.044800
+8000         | 0.204000             | 0.179000
+12000        | 0.459000             | 0.402000
+16000        | 0.816000             | 0.716000
+==============================================================================
+
+Estimated Complexity (log-log regression)
+  03_bubble_sort       : O(N^2)        R²=0.9998  ████████████████████  (exponent=2.00)
+  04_selection_sort    : O(N^2)        R²=0.9997  ████████████████████  (exponent=2.00)
+
+  Both scale as O(N^2) -- differences are constant-factor, not algorithmic.
+```
+
 ## Metrics Explained
 
 - **Time Elapsed:** Wall-clock runtime. Lower is usually better.
@@ -107,6 +201,8 @@ Example demo commands:
 - **Branch Misses:** Failed branch predictions. Lower usually means less wasted speculative work.
 - **Temperature/Frequency:** Fairness indicators only. They are not used to normalize the final score because CPU thermal behavior is non-linear and hardware-dependent.
 - **Frequency Context:** The system-context table reports observed CPU frequency when available. A warning appears only when one run has a noticeably higher average frequency.
+- **Scaling Exponent:** The power k in the relationship Time ≈ c·N^k, estimated via log-log regression. Directly corresponds to the Big O class.
+- **R² (Coefficient of Determination):** Measures how well the empirical data fits the estimated complexity model. Values near 1.0 indicate high confidence.
 
 ## Why Temperature Is Not Used For Normalization
 
@@ -128,6 +224,8 @@ Select a built-in benchmark pair:
 Enter choice [1-4]: 1
 Duration in seconds [10]: 10
 Number of runs to average [1]: 5
+Auto-cooldown? (1=yes, 0=no) [0]: 0
+Cooldown between runs in seconds [5]: 5
 Pin to CPU core (-1 for no pinning) [-1]: 0
 
 [1/2 run 1/5] Profiling ./testcases/01_row_major for up to 10 seconds on CPU core 0...

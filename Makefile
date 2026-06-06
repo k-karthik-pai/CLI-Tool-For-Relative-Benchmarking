@@ -10,7 +10,7 @@ TESTCASE_BINARIES := $(TESTCASE_SOURCES:.c=)
 all: perfcmp testcases
 
 perfcmp: perfcmp.c
-	$(CC) $(CFLAGS) $< -o $@
+	$(CC) $(CFLAGS) $< -o $@ -lm
 
 testcases: $(TESTCASE_BINARIES)
 

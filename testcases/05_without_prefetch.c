@@ -3,14 +3,21 @@
 #include <time.h>
 
 /* Sequential scan without software prefetch hints. */
-#define N (1 << 24)
+#define DEFAULT_N (1 << 24)
 
 static double elapsed_seconds(struct timespec start, struct timespec end) {
     return (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
 }
 
-int main(void) {
-    float *arr = malloc(N * sizeof(*arr));
+int main(int argc, char *argv[]) {
+    int n = DEFAULT_N;
+    if (argc > 1) {
+        int parsed = atoi(argv[1]);
+        if (parsed > 0 && parsed <= (1 << 26))
+            n = parsed;
+    }
+
+    float *arr = malloc(n * sizeof(*arr));
     volatile double checksum = 0.0;
     struct timespec start;
     struct timespec end;
@@ -20,15 +27,15 @@ int main(void) {
         return 1;
     }
 
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < n; i++) {
         arr[i] = (float)i;
     }
 
     printf("=== Without Prefetch ===\n");
-    printf("Workload: %.0f MB float array\n\n", N * sizeof(*arr) / 1e6);
+    printf("Workload: %.0f MB float array\n\n", n * sizeof(*arr) / 1e6);
 
     clock_gettime(CLOCK_MONOTONIC, &start);
-    for (int i = 0; i < N; i++) {
+    for (int i = 0; i < n; i++) {
         checksum += arr[i];
     }
     clock_gettime(CLOCK_MONOTONIC, &end);

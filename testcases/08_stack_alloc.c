@@ -1,8 +1,9 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 
 /* Demonstrates automatic stack allocation for fixed-size local buffers. */
-#define ITERS 1000000
+#define DEFAULT_ITERS 1000000
 #define BLOCK_SIZE 256
 
 static double elapsed_seconds(struct timespec start, struct timespec end) {
@@ -20,16 +21,23 @@ static unsigned int touch(volatile char *p, int n) {
     return checksum;
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
+    int iters = DEFAULT_ITERS;
+    if (argc > 1) {
+        int parsed = atoi(argv[1]);
+        if (parsed > 0 && parsed <= 10000000)
+            iters = parsed;
+    }
+
     struct timespec start;
     struct timespec end;
     unsigned long long checksum = 0;
 
     printf("=== Stack Allocation ===\n");
-    printf("Workload: %d-byte block, %d iterations\n\n", BLOCK_SIZE, ITERS);
+    printf("Workload: %d-byte block, %d iterations\n\n", BLOCK_SIZE, iters);
 
     clock_gettime(CLOCK_MONOTONIC, &start);
-    for (int i = 0; i < ITERS; i++) {
+    for (int i = 0; i < iters; i++) {
         char p[BLOCK_SIZE];
         checksum += touch(p, BLOCK_SIZE);
     }
