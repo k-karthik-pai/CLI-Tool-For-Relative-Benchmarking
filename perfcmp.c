@@ -1,18 +1,5 @@
-/*
- * perfcmp.c — A Linux CLI tool for relative benchmarking of two binaries.
- *
- * Uses `perf stat` to collect hardware performance counters (cycles,
- * instructions, branch-misses) and wall-clock time for each binary,
- * then prints a side-by-side comparison table with percentage deltas.
- *
- * Features:
- *   - Warm-up pass to prime caches before measurement.
- *   - Configurable run count with averaged results.
- *   - Fixed or temperature-based auto-cooldown between runs.
- *   - Optional CPU core pinning via taskset.
- *   - Built-in demo pairs for common performance experiments.
- *   - Algorithmic scaling analysis (--scaling) with O() estimation.
- *
+/* perfcmp.c — Relative benchmarking of two binaries using perf stat.
+ * Compares cycles, instructions, branch-misses, and wall-clock time.
  * Requirements: Linux, gcc, make, GNU timeout, perf.
  */
 
@@ -33,19 +20,10 @@
 #define ANSI_COLOR_YELLOW  "\x1b[33m"
 #define ANSI_COLOR_RESET   "\x1b[0m"
 
-/* Global flag: 1 = emit ANSI color escape codes, 0 = plain text output. */
+/* 1 = color output, 0 = plain text */
 static int g_use_color = 1;
 
-/*
- * Signal-safe temporary file cleanup.
- *
- * g_cleanup_logs holds up to 3 temp log file paths that should be deleted
- * if the process is interrupted (e.g. SIGINT, SIGTERM).  cleanup_on_signal
- * is registered as the signal handler; it unlinks any non-empty paths and
- * exits with 128 + signal number (standard UNIX convention).
- *
- * Only async-signal-safe functions (unlink, _exit) are called here.
- */
+/* Temp log paths for cleanup on Ctrl+C. Only async-signal-safe calls here. */
 static char g_cleanup_logs[3][128];
 
 static void cleanup_on_signal(int sig) {
@@ -91,14 +69,10 @@ static void cleanup_on_signal(int sig) {
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════════
- *  Data structures
+ *  Data types
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/*
- * PerfMetrics — Raw hardware counter values extracted from a perf stat log.
- * Each field has a companion has_* flag that is set to 1 when the value was
- * successfully parsed.  IPC is derived (instructions / cycles).
- */
+/* Hardware counter values from a perf stat run. has_* flags track availability. */
 typedef struct {
     unsigned long long cycles;
     unsigned long long instructions;
@@ -112,11 +86,7 @@ typedef struct {
     int has_ipc;
 } PerfMetrics;
 
-/*
- * SystemContext — Snapshot of CPU temperature (°C) and average frequency
- * (MHz) taken before and after a benchmark run to detect thermal throttling
- * or frequency scaling that could skew results.
- */
+/* CPU temp + freq snapshot for detecting thermal bias. */
 typedef struct {
     double temperature_c;
     double frequency_mhz;
@@ -124,11 +94,7 @@ typedef struct {
     int has_frequency;
 } SystemContext;
 
-/*
- * BenchmarkRun — Groups everything related to one binary's benchmark:
- * the path to the binary, a short display name, the temp log path used by
- * perf stat, the averaged metrics, and before/after system context snapshots.
- */
+/* Everything about one binary's benchmark: path, metrics, thermal context. */
 typedef struct {
     const char *binary_path;
     const char *display_name;
@@ -138,10 +104,7 @@ typedef struct {
     SystemContext after;
 } BenchmarkRun;
 
-/*
- * ComplexityClass — Enumeration of algorithmic complexity classes used by
- * the --scaling analysis to classify observed growth rates.
- */
+/* Big O classes for the scaling engine. */
 typedef enum {
     COMPLEXITY_CONSTANT,
     COMPLEXITY_LINEAR,
@@ -151,10 +114,7 @@ typedef enum {
     COMPLEXITY_UNKNOWN
 } ComplexityClass;
 
-/*
- * ScalingData — Stores elapsed times for both binaries at each input size
- * during a --scaling analysis run.
- */
+/* Raw timing data at multiple input sizes for scaling analysis. */
 typedef struct {
     int sizes[MAX_SCALE_POINTS];
     double times1[MAX_SCALE_POINTS];
@@ -162,21 +122,14 @@ typedef struct {
     int count;
 } ScalingData;
 
-/*
- * ScalingResult — Outcome of fitting a complexity model to observed scaling
- * data: the best-fit class, the estimated power-law exponent, and R².
- */
+/* Result of fitting a complexity model: class, exponent, R². */
 typedef struct {
     ComplexityClass best_fit;
     double exponent;
     double r_squared;
 } ScalingResult;
 
-/*
- * DemoPair — Describes one built-in demo benchmark pair: display title,
- * paths to both binaries, the concept being demonstrated, the expected
- * complexity notation, and default input sizes for scaling analysis.
- */
+/* A built-in demo pair: title, binaries, concept, expected complexity, default sizes. */
 typedef struct {
     const char *title;
     const char *binary1;
@@ -186,11 +139,7 @@ typedef struct {
     int default_sizes[DEFAULT_SCALE_POINTS];
 } DemoPair;
 
-/*
- * Built-in demo pairs: pre-configured benchmark experiments shipped with
- * the tool.  Each entry contains two binaries that illustrate a specific
- * performance concept (cache locality, sorting cost, prefetch hints, etc.).
- */
+/* Built-in benchmark experiments shipped with the tool. */
 static const DemoPair DEMO_PAIRS[] = {
     {
         "Row-major vs column-major",
@@ -227,15 +176,10 @@ static const DemoPair DEMO_PAIRS[] = {
 };
 
 /* ══════════════════════════════════════════════════════════════════════════
- *  CLI usage / help
+ *  Usage / help
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/*
- * print_usage — Prints full help text including usage patterns, available
- * options, built-in demo pairs, examples, and system requirements.
- *
- * @param program_name  argv[0], used to build example command lines.
- */
+/* Print the full --help text. */
 static void print_usage(const char *program_name) {
     size_t i;
 
@@ -292,17 +236,10 @@ static void print_usage(const char *program_name) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- *  String / parsing utilities
+ *  String / parsing helpers
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/*
- * base_name — Extracts the filename component from a full path.
- * Handles both forward-slash and backslash separators.
- *
- * @param path  A file path string (e.g. "/usr/bin/ls" or "C:\\bin\\ls").
- * @return      Pointer into `path` just past the last separator, or `path`
- *              itself if no separator is found.
- */
+/* Extract filename from a path (handles / and \). */
 static const char *base_name(const char *path) {
     const char *slash = strrchr(path, '/');
     const char *backslash = strrchr(path, '\\');
@@ -315,13 +252,7 @@ static const char *base_name(const char *path) {
     return (last_sep != NULL) ? last_sep + 1 : path;
 }
 
-/*
- * remove_commas — Strips all comma characters from a string in place.
- * Used to normalise perf stat output numbers (e.g. "1,234,567" -> "1234567")
- * before parsing them with sscanf.
- *
- * @param str  The string to modify (modified in place).
- */
+/* Strip commas from perf output numbers (e.g. "1,234" -> "1234"). */
 static void remove_commas(char *str) {
     size_t read_index = 0;
     size_t write_index = 0;
@@ -336,17 +267,7 @@ static void remove_commas(char *str) {
     str[write_index] = '\0';
 }
 
-/*
- * parse_int_in_range — Safely converts a string to an integer and checks
- * that the result lies within [min_value, max_value].  Uses strtol for
- * robust error detection (overflow, trailing characters, empty input).
- *
- * @param text       Null-terminated decimal string to parse.
- * @param min_value  Lower bound (inclusive).
- * @param max_value  Upper bound (inclusive).
- * @param value      Output: the parsed integer on success.
- * @return           1 on success, 0 on any parse error or out-of-range.
- */
+/* Safe string-to-int with range check. Returns 1 on success. */
 static int parse_int_in_range(const char *text, int min_value, int max_value, int *value) {
     char *end = NULL;
     long parsed;
@@ -366,25 +287,12 @@ static int parse_int_in_range(const char *text, int min_value, int max_value, in
     return 1;
 }
 
-/*
- * parse_duration_seconds — Convenience wrapper: parses a duration value
- * and validates it against MIN/MAX_DURATION_SECONDS.
- *
- * @return  1 on success, 0 on error.
- */
+/* Validate a duration value against min/max bounds. */
 static int parse_duration_seconds(const char *text, int *value) {
     return parse_int_in_range(text, MIN_DURATION_SECONDS, MAX_DURATION_SECONDS, value);
 }
 
-/*
- * command_exit_code — Extracts a conventional exit code from the raw
- * status value returned by system().  On POSIX the macros WIFEXITED /
- * WEXITSTATUS / WIFSIGNALED / WTERMSIG are used; on Windows the status
- * value is returned directly.
- *
- * @param status  Raw return value from system().
- * @return        Exit code (0–255), or 128+signal if killed, or -1 on error.
- */
+/* Extract exit code from system() return value. */
 static int command_exit_code(int status) {
     if (status == -1) {
         return -1;
@@ -405,28 +313,13 @@ static int command_exit_code(int status) {
 #endif
 }
 
-/*
- * shell_command_succeeds — Runs a shell command and returns 1 if it exits
- * with code 0, 0 otherwise.  Used to test for tool availability.
- *
- * @param command  Shell command string to execute.
- * @return         1 if exit code == 0, 0 otherwise.
- */
+/* Run a command, return 1 if it exits 0. */
 static int shell_command_succeeds(const char *command) {
     int status = system(command);
     return command_exit_code(status) == 0;
 }
 
-/*
- * quote_shell_arg — Wraps `input` in POSIX single quotes, escaping any
- * embedded single-quote characters with the '\'' idiom.  This prevents
- * shell injection when the string is interpolated into a system() call.
- *
- * @param input        Raw string to quote.
- * @param output       Buffer to receive the quoted result.
- * @param output_size  Size of `output` buffer.
- * @return             1 on success, 0 if `output` is too small.
- */
+/* Wrap a string in single quotes for safe shell interpolation. */
 static int quote_shell_arg(const char *input, char *output, size_t output_size) {
     size_t pos = 0;
     size_t i;
@@ -466,18 +359,10 @@ static int quote_shell_arg(const char *input, char *output, size_t output_size) 
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- *  System monitoring helpers
+ *  System monitoring
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/*
- * read_temperature_c — Reads the average CPU temperature from the Linux
- * sysfs thermal zone interface (/sys/class/thermal/thermal_zone[0-5]/temp).
- * Iterates over zones 0–5, averaging all valid readings.  Values reported
- * in millidegrees (>1000) are converted to degrees Celsius.
- *
- * @param temperature_c  Output: average temperature in °C.
- * @return               1 if at least one valid reading was found, 0 otherwise.
- */
+/* Read CPU temp from /sys/class/thermal/. Averages all available zones. */
 static int read_temperature_c(double *temperature_c) {
     const char *paths[] = {
         "/sys/class/thermal/thermal_zone0/temp",
@@ -519,14 +404,7 @@ static int read_temperature_c(double *temperature_c) {
     return 1;
 }
 
-/*
- * read_average_frequency_mhz — Reads average CPU frequency by parsing
- * "cpu MHz" lines from /proc/cpuinfo.  Averages all cores' frequencies.
- *
- * @param frequency_mhz  Output: average frequency in MHz.
- * @return               1 on success, 0 if /proc/cpuinfo is unavailable
- *                       or contains no frequency entries.
- */
+/* Read average CPU frequency from /proc/cpuinfo. */
 static int read_average_frequency_mhz(double *frequency_mhz) {
     FILE *fp = fopen("/proc/cpuinfo", "r");
     char line[256];
@@ -558,13 +436,7 @@ static int read_average_frequency_mhz(double *frequency_mhz) {
     return 1;
 }
 
-/*
- * capture_system_context — Takes a point-in-time snapshot of CPU temperature
- * and frequency.  Called before and after benchmark runs so the comparison
- * table can flag thermal throttling or frequency drift.
- *
- * @return  A SystemContext struct with the readings and validity flags.
- */
+/* Snapshot current CPU temp + freq. */
 static SystemContext capture_system_context(void) {
     SystemContext context;
 
@@ -641,20 +513,10 @@ static int wait_for_temp_baseline(double baseline_temp_c,
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- *  Perf stat integration
+ *  Perf stat
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/*
- * parse_perf_file — Opens a perf stat log file and extracts hardware
- * counter values (cycles, instructions, branch-misses) and elapsed time.
- * Commas in numeric output are stripped before parsing.  If both cycles
- * and instructions are present, IPC is computed as instructions/cycles.
- *
- * @param filename  Path to the perf stat output file.
- * @param metrics   Output: populated PerfMetrics struct.
- * @return          1 on success, 0 if the file cannot be opened or the
- *                  elapsed-time field is missing.
- */
+/* Parse a perf stat log file and extract counter values. */
 static int parse_perf_file(const char *filename, PerfMetrics *metrics) {
     FILE *fp = fopen(filename, "r");
     char line[512];
@@ -710,11 +572,7 @@ static int parse_perf_file(const char *filename, PerfMetrics *metrics) {
     return 1;
 }
 
-/*
- * print_common_perf_failure_help — Prints a checklist of common reasons
- * why perf stat might fail (missing packages, permissions, missing tools,
- * bad binary).  Called after a perf command returns a non-zero exit code.
- */
+/* Print troubleshooting tips when perf fails. */
 static void print_common_perf_failure_help(void) {
     fprintf(stderr, "\nCommon causes:\n");
     fprintf(stderr, "  - perf is not installed. Ubuntu: sudo apt install linux-tools-common linux-tools-generic\n");
@@ -725,21 +583,7 @@ static void print_common_perf_failure_help(void) {
     fprintf(stderr, "  - The benchmark binary crashed or does not have execute permission.\n");
 }
 
-/*
- * run_perf_stat — Constructs and executes a `perf stat` command line that
- * profiles the given binary for up to `duration_seconds`, optionally
- * pinned to a specific CPU core.  Output is written to `log_path`.
- * Exit code 124 (GNU timeout) is treated as success (binary ran for the
- * full duration and was killed).
- *
- * @param binary_path       Path to the benchmark binary.
- * @param log_path          Temp file path for perf stat output.
- * @param duration_seconds  Wall-clock budget via GNU `timeout`.
- * @param pin_core          CPU core ID for taskset, or -1 to skip pinning.
- * @param extra_arg         Optional extra argument appended to the binary
- *                          invocation (e.g. an input size), or NULL.
- * @return                  1 on success, 0 on failure.
- */
+/* Build and run the perf stat command. Exit code 124 = timeout (OK). */
 static int run_perf_stat(const char *binary_path,
                          const char *log_path,
                          int duration_seconds,
@@ -796,22 +640,10 @@ static int run_perf_stat(const char *binary_path,
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- *  Multi-run metric accumulation
+ *  Metric accumulation
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/*
- * add_metric_sample — Accumulates one benchmark run's metrics into running
- * totals.  Each counter is only added when its has_* flag is set, and the
- * corresponding per-counter count is incremented so that
- * finalize_average_metrics can compute correct averages.
- *
- * @param total               Running totals (modified in place).
- * @param sample              Metrics from the latest single run.
- * @param cycles_count        Number of runs that contributed cycle data.
- * @param instructions_count  Number of runs that contributed instruction data.
- * @param branch_misses_count Number of runs that contributed branch-miss data.
- * @param seconds_count       Number of runs that contributed elapsed time.
- */
+/* Add one run's metrics to running totals. */
 static void add_metric_sample(PerfMetrics *total,
                               const PerfMetrics *sample,
                               int *cycles_count,
@@ -839,23 +671,7 @@ static void add_metric_sample(PerfMetrics *total,
     }
 }
 
-/*
- * finalize_average_metrics — Divides the accumulated metric totals by their
- * respective run counts to produce averaged results.  Uses rounded integer
- * division (adding count/2 before dividing) for the unsigned-long-long
- * counters to avoid systematic truncation bias.  Also recomputes IPC from
- * the averaged cycle and instruction counts.
- *
- * @param metrics             In/out: accumulated totals on entry, averages
- *                            on exit.
- * @param cycles_count        Runs contributing cycles.
- * @param instructions_count  Runs contributing instructions.
- * @param branch_misses_count Runs contributing branch misses.
- * @param seconds_count       Runs contributing elapsed time.
- * @param run_count           Expected total number of runs.
- * @return                    1 on success, 0 if seconds_count != run_count
- *                            (indicates a missing elapsed-time measurement).
- */
+/* Divide accumulated totals by run count to get averages. */
 static int finalize_average_metrics(PerfMetrics *metrics,
                                     int cycles_count,
                                     int instructions_count,
@@ -1040,16 +856,7 @@ static int run_benchmark(BenchmarkRun *run,
                                     branch_misses_count, seconds_count, run_count);
 }
 
-/*
- * format_ull_metric: formats an unsigned long long metric value into a
- * display string.  If the metric was not collected (available == 0), the
- * buffer is filled with "N/A".
- *
- *   available    - whether the metric was successfully measured
- *   value        - the raw metric value
- *   buffer       - output character buffer for the formatted string
- *   buffer_size  - size of the output buffer in bytes
- */
+/* Format an unsigned long long for display, or "N/A" if unavailable. */
 static void format_ull_metric(int available, unsigned long long value, char *buffer, size_t buffer_size) {
     if (!available) {
         snprintf(buffer, buffer_size, "N/A");
@@ -1058,17 +865,7 @@ static void format_ull_metric(int available, unsigned long long value, char *buf
     }
 }
 
-/*
- * format_double_metric: formats a double-precision metric value into a
- * display string with a given number of decimal places.  If the metric
- * was not collected (available == 0), the buffer is filled with "N/A".
- *
- *   available    - whether the metric was successfully measured
- *   value        - the raw metric value
- *   precision    - number of digits after the decimal point
- *   buffer       - output character buffer for the formatted string
- *   buffer_size  - size of the output buffer in bytes
- */
+/* Format a double for display, or "N/A" if unavailable. */
 static void format_double_metric(int available, double value, int precision, char *buffer, size_t buffer_size) {
     if (!available) {
         snprintf(buffer, buffer_size, "N/A");
@@ -1077,20 +874,7 @@ static void format_double_metric(int available, double value, int precision, cha
     }
 }
 
-/*
- * print_metric_row: prints a single row of the benchmark comparison table.
- * Computes the percentage difference between the two raw values and
- * color-codes the output: green if the second binary is better, red if
- * worse.  When values are unavailable or the first value is zero, the
- * diff column shows "N/A".
- *
- *   metric_name      - label for this row (e.g. "CPU Cycles")
- *   value1           - pre-formatted string for binary 1
- *   value2           - pre-formatted string for binary 2
- *   values_available - 1 if both metrics were collected, 0 otherwise
- *   raw1, raw2       - raw numeric values used to compute percentage diff
- *   lower_is_better  - 1 if a lower value indicates better performance
- */
+/* Print one row of the comparison table with color-coded % diff. */
 static void print_metric_row(const char *metric_name,
                              const char *value1,
                              const char *value2,
@@ -1130,16 +914,7 @@ static void print_metric_row(const char *metric_name,
     }
 }
 
-/*
- * print_metric_table: prints the full benchmark performance comparison
- * table.  Each row shows a perf metric (time, cycles, instructions, IPC,
- * branch misses) for both binaries side-by-side with a percentage diff
- * column.  Uses format_ull_metric / format_double_metric for formatting
- * and print_metric_row for color-coded output.
- *
- *   run1 - results from the first binary
- *   run2 - results from the second binary
- */
+/* Print the full side-by-side benchmark comparison table. */
 static void print_metric_table(const BenchmarkRun *run1, const BenchmarkRun *run2) {
     char value1[64];
     char value2[64];
@@ -1184,17 +959,7 @@ static void print_metric_table(const BenchmarkRun *run1, const BenchmarkRun *run
     printf("%s\n", METRIC_TABLE_LINE);
 }
 
-/*
- * format_context_value: formats a system-context value (e.g. CPU
- * temperature or frequency) into a display string with a unit suffix.
- * Writes "N/A" when the reading is unavailable.
- *
- *   available    - whether the sensor reading was captured
- *   value        - the numeric sensor reading
- *   suffix       - unit string appended after the value (e.g. "C", "MHz")
- *   buffer       - output character buffer
- *   buffer_size  - size of the output buffer in bytes
- */
+/* Format a sensor reading (temp/freq) with unit suffix, or "N/A". */
 static void format_context_value(int available,
                                  double value,
                                  const char *suffix,
@@ -1207,18 +972,7 @@ static void format_context_value(int available,
     }
 }
 
-/*
- * print_system_context_table: prints a table showing the CPU temperature
- * and frequency captured before and after each binary's measured runs.
- * These values are fairness indicators — they are NOT used to normalize
- * scores, but help the user judge whether thermal throttling or frequency
- * scaling may have biased the comparison.  Emits yellow warnings if the
- * temperature or frequency delta between the two binaries exceeds the
- * configured thresholds.
- *
- *   run1 - results (including before/after context) for binary 1
- *   run2 - results (including before/after context) for binary 2
- */
+/* Print CPU temp/freq before and after each run, with bias warnings. */
 static void print_system_context_table(const BenchmarkRun *run1, const BenchmarkRun *run2) {
     char temp_before[32];
     char temp_after[32];
@@ -1301,15 +1055,7 @@ static void print_system_context_table(const BenchmarkRun *run1, const Benchmark
     }
 }
 
-/*
- * relative_difference: computes the relative (percentage-style) difference
- * between two non-negative values.  Returns (larger - smaller) / larger,
- * a value in [0, 1].  Returns 0 when both values are zero.
- *
- *   a, b - the two values to compare
- *
- * Returns: the relative difference as a fraction.
- */
+/* Compute (larger - smaller) / larger. Returns 0 if both are zero. */
 static double relative_difference(double a, double b) {
     double larger = a > b ? a : b;
     double smaller = a > b ? b : a;
@@ -1321,20 +1067,7 @@ static double relative_difference(double a, double b) {
     return (larger - smaller) / larger;
 }
 
-/*
- * add_metric_vote: adds a weighted vote to the verdict scoring system for
- * one performance metric.  If the metric is available for both binaries
- * and the relative difference exceeds the given threshold, the winning
- * binary's score is incremented by 'weight'.  Ties and differences below
- * the threshold are ignored to avoid noise in the verdict.
- *
- *   score1, score2     - running score accumulators for each binary
- *   available1/2       - whether the metric was collected for each binary
- *   value1, value2     - raw metric values
- *   weight             - points to award for this metric category
- *   threshold          - minimum relative difference to count as a win
- *   lower_is_better    - 1 if a lower value means better performance
- */
+/* Add a weighted vote to the verdict score if the metric difference exceeds threshold. */
 static void add_metric_vote(double *score1,
                             double *score2,
                             int available1,
@@ -1367,11 +1100,7 @@ static void add_metric_vote(double *score1,
     }
 }
 
-/*
- * print_metric_explanations: prints a brief guide explaining what each
- * performance metric means and whether lower or higher is better.  This
- * helps users who are unfamiliar with perf counters interpret the table.
- */
+/* Print a short guide explaining what each metric means. */
 static void print_metric_explanations(void) {
     printf("\nMetric Guide\n");
     printf("  Time Elapsed : Real wall-clock runtime. Lower is better.\n");
@@ -1382,17 +1111,7 @@ static void print_metric_explanations(void) {
     printf("  Temp/Freq    : Fairness context only; temperature/frequency do not normalize scores.\n");
 }
 
-/*
- * print_verdict: analyzes all collected metrics via a weighted voting
- * system and prints which binary is the overall winner.  Time elapsed
- * carries the heaviest weight (4.0), followed by cycles and IPC (2.0
- * each), then instructions and branch misses (1.0 each).  If the score
- * gap is less than 2.0 the result is declared inconclusive.  Also
- * prints the primary reason based on elapsed-time difference.
- *
- *   run1 - benchmark results for binary 1
- *   run2 - benchmark results for binary 2
- */
+/* Weighted voting across all metrics to decide the winner. */
 static void print_verdict(const BenchmarkRun *run1, const BenchmarkRun *run2) {
     double score1 = 0.0;
     double score2 = 0.0;
@@ -1450,12 +1169,7 @@ static void print_verdict(const BenchmarkRun *run1, const BenchmarkRun *run2) {
 
 }
 
-/*
- * trim_newline: removes a trailing newline character ('\n') from a
- * string in place.  Used to sanitize lines read by fgets.
- *
- *   text - null-terminated string to modify
- */
+/* Strip trailing newline from fgets output. */
 static void trim_newline(char *text) {
     size_t len = strlen(text);
 
@@ -1464,19 +1178,7 @@ static void trim_newline(char *text) {
     }
 }
 
-/*
- * read_menu_int: displays a prompt and reads an integer from stdin.
- * If the user presses Enter without typing anything, default_value is
- * used.  The parsed value must fall within [min_value, max_value].
- *
- *   prompt        - text to display before reading input
- *   default_value - value returned on empty input
- *   min_value     - lower bound (inclusive) for valid input
- *   max_value     - upper bound (inclusive) for valid input
- *   value         - output pointer for the parsed integer
- *
- * Returns: 1 on success, 0 on invalid input or EOF.
- */
+/* Read an int from stdin with a default value and range validation. */
 static int read_menu_int(const char *prompt, int default_value, int min_value, int max_value, int *value) {
     char line[64];
     int parsed;
@@ -1502,22 +1204,7 @@ static int read_menu_int(const char *prompt, int default_value, int min_value, i
     return 1;
 }
 
-/*
- * choose_demo_pair: presents an interactive menu that lets the user
- * select one of the built-in DEMO_PAIRS benchmark pairs and configure
- * run parameters (duration, run count, cooldown mode, CPU pinning).
- * Populates all output parameters and prints the equivalent CLI command
- * so the user can reproduce the run non-interactively.
- *
- *   duration_seconds - output, benchmark duration per run
- *   run_count        - output, number of measured passes
- *   pin_core         - output, CPU core to pin to (-1 = disabled)
- *   cooldown_seconds - output, fixed cooldown between runs
- *   auto_cooldown    - output, 1 to use temperature-based cooldown
- *   binary1, binary2 - output, paths to the two demo binaries
- *
- * Returns: 1 on success, 0 on invalid user input.
- */
+/* Interactive menu: pick a demo pair and configure run parameters. */
 static int choose_demo_pair(int *duration_seconds,
                             int *run_count,
                             int *pin_core,
@@ -1610,17 +1297,7 @@ static int choose_demo_pair(int *duration_seconds,
 
 /* ── Scaling analysis ─────────────────────────────────────────────────────── */
 
-/*
- * parse_sizes_list: parses a comma-separated list of positive integers
- * from the --sizes CLI flag into an array.  Values must be in the range
- * (0, 100000000].  Parsing stops at max_count entries.
- *
- *   text      - null-terminated input string (e.g. "1000,2000,4000")
- *   sizes     - output array of parsed integers
- *   max_count - maximum number of entries to parse
- *
- * Returns: the number of sizes parsed, or -1 on format error.
- */
+/* Parse comma-separated integers from the --sizes flag. */
 static int parse_sizes_list(const char *text, int *sizes, int max_count) {
     int count = 0;
     const char *p = text;
@@ -1654,18 +1331,7 @@ static int parse_sizes_list(const char *text, int *sizes, int max_count) {
     return count;
 }
 
-/*
- * log_log_regression: performs ordinary least-squares linear regression
- * in log-log space.  By fitting log(time) = slope * log(N) + intercept,
- * the slope approximates the exponent in the power-law T(N) ~ N^slope.
- * Also computes R² as a goodness-of-fit measure.
- *
- *   sizes          - array of input sizes N
- *   times          - array of measured elapsed times for each N
- *   count          - number of data points
- *   out_slope      - output, the regression slope (power exponent)
- *   out_r_squared  - output, coefficient of determination R²
- */
+/* Least-squares regression in log-log space. Slope = power exponent. */
 static void log_log_regression(const int *sizes, const double *times, int count,
                                 double *out_slope, double *out_r_squared) {
     double sum_x = 0.0, sum_y = 0.0;
@@ -1729,18 +1395,7 @@ static void log_log_regression(const int *sizes, const double *times, int count,
     *out_r_squared = (ss_tot > 1e-15) ? (1.0 - ss_res / ss_tot) : 0.0;
 }
 
-/*
- * nlogn_fit_r_squared: computes the R² goodness-of-fit for an O(N log N)
- * model.  It fits log(time) against log(N * log(N)) using linear
- * regression.  This is used to disambiguate O(N log N) from O(N) when
- * the log-log slope falls in the ambiguous range around 1.0.
- *
- *   sizes - array of input sizes N
- *   times - array of measured elapsed times for each N
- *   count - number of data points
- *
- * Returns: R² for the N log N fit (0.0 if insufficient data).
- */
+/* R² for an O(N log N) model, used to disambiguate from O(N). */
 static double nlogn_fit_r_squared(const int *sizes, const double *times, int count) {
     double sum_x = 0.0, sum_y = 0.0;
     double sum_xx = 0.0, sum_xy = 0.0;
@@ -1800,21 +1455,7 @@ static double nlogn_fit_r_squared(const int *sizes, const double *times, int cou
     return (ss_tot > 1e-15) ? (1.0 - ss_res / ss_tot) : 0.0;
 }
 
-/*
- * classify_complexity: maps a regression exponent (slope from log-log
- * regression) to a Big O complexity class.  Uses the following bands:
- *   slope < 0.3      → O(1)
- *   0.3  ≤ slope < 1.35 → O(N)  (or O(N log N) if the N·log N model
- *                                  fits better)
- *   1.35 ≤ slope < 2.3  → O(N²)
- *   2.3  ≤ slope < 3.3  → O(N³)
- *   otherwise          → unknown (shown as O(N^slope))
- *
- *   sizes  - array of input sizes
- *   times  - array of measured elapsed times
- *   count  - number of data points
- *   result - output ScalingResult with best_fit, exponent, and R²
- */
+/* Map the regression slope to a Big O class (O(1), O(N), O(N²), etc). */
 static void classify_complexity(const int *sizes, const double *times, int count,
                                  ScalingResult *result) {
     double slope, r_sq;
@@ -1847,17 +1488,7 @@ static void classify_complexity(const int *sizes, const double *times, int count
     }
 }
 
-/*
- * format_complexity_label: converts a ComplexityClass enum into a
- * human-readable string like "O(1)", "O(N)", "O(N log N)", "O(N^2)",
- * etc.  For COMPLEXITY_UNKNOWN, it shows the raw exponent as
- * "O(N^<exponent>)".
- *
- *   cls         - the classified complexity enum value
- *   exponent    - the raw slope from log-log regression
- *   buffer      - output character buffer
- *   buffer_size - size of the output buffer in bytes
- */
+/* Turn a ComplexityClass enum into a string like "O(N^2)". */
 static void format_complexity_label(ComplexityClass cls, double exponent,
                                      char *buffer, size_t buffer_size) {
     switch (cls) {
@@ -1882,15 +1513,7 @@ static void format_complexity_label(ComplexityClass cls, double exponent,
     }
 }
 
-/*
- * print_scaling_table: prints a table of elapsed times at each input
- * size N for both binaries.  This gives the user raw data to visually
- * inspect how execution time grows with input size.
- *
- *   data  - scaling data containing sizes and per-binary times
- *   name1 - display name of binary 1
- *   name2 - display name of binary 2
- */
+/* Print elapsed times at each input size for both binaries. */
 static void print_scaling_table(const ScalingData *data,
                                  const char *name1, const char *name2) {
     int i;
@@ -1909,14 +1532,7 @@ static void print_scaling_table(const ScalingData *data,
     printf("%s\n", METRIC_TABLE_LINE);
 }
 
-/*
- * print_r_squared_bar: prints a 20-character visual bar graph
- * representing the R² confidence value.  Filled blocks (█) indicate
- * the proportion of variance explained; empty blocks (░) fill the
- * remainder.  The bar is clamped to [0.0, 1.0].
- *
- *   r_sq - R² value from the regression (0.0 to 1.0)
- */
+/* Print a visual bar graph for the R² confidence value. */
 static void print_r_squared_bar(double r_sq) {
     int filled;
     int i;
@@ -1940,16 +1556,7 @@ static void print_r_squared_bar(double r_sq) {
     }
 }
 
-/*
- * print_scaling_verdict: prints the final scaling analysis result.
- * Shows each binary's estimated Big O complexity class, the raw
- * exponent, R² confidence with a visual bar, and a summary stating
- * whether the difference is algorithmic or constant-factor.
- *
- *   res1, res2 - scaling analysis results for each binary
- *   name1      - display name of binary 1
- *   name2      - display name of binary 2
- */
+/* Print the final scaling result: complexity class + R² for each binary. */
 static void print_scaling_verdict(const ScalingResult *res1, const ScalingResult *res2,
                                    const char *name1, const char *name2) {
     char label1[32], label2[32];
@@ -1976,21 +1583,7 @@ static void print_scaling_verdict(const ScalingResult *res1, const ScalingResult
     }
 }
 
-/*
- * run_scaling_analysis: orchestrates the full scaling (Big O) analysis
- * pipeline.  For each input size N, it runs both binaries via perf stat,
- * collects elapsed times, then performs log-log regression to classify
- * each binary's empirical complexity.  Outputs the raw timing table and
- * a verdict comparing the two complexity classes.
- *
- *   binary1, binary2 - paths to the two executable binaries
- *   name1, name2     - display names for the binaries
- *   sizes            - array of input sizes to test
- *   size_count       - number of input sizes
- *   pin_core         - CPU core to pin to (-1 = disabled)
- *
- * Returns: 1 on success, 0 on any perf or parsing failure.
- */
+/* Run both binaries at multiple sizes, do regression, print results. */
 static int run_scaling_analysis(const char *binary1, const char *binary2,
                                  const char *name1, const char *name2,
                                  const int *sizes, int size_count,
@@ -2053,28 +1646,7 @@ static int run_scaling_analysis(const char *binary1, const char *binary2,
     return 1;
 }
 
-/*
- * parse_arguments: parses and validates all command-line arguments.
- * Handles --duration, --runs, --cooldown, --auto-cooldown, --pin-core,
- * --scaling, --sizes, --demo, --help, and the two positional binary
- * paths.  Enforces mutual exclusion between --cooldown and
- * --auto-cooldown, and between --demo and custom binaries.  Falls
- * through to choose_demo_pair() when no binaries are given or --demo
- * is specified.
- *
- *   argc, argv          - standard C main arguments
- *   duration_seconds     - output, per-run duration
- *   run_count            - output, number of measured passes
- *   pin_core             - output, CPU core to pin to (-1 = disabled)
- *   cooldown_seconds     - output, fixed cooldown between runs
- *   auto_cooldown        - output, 1 for temperature-based cooldown
- *   scaling_mode         - output, 1 if --scaling was requested
- *   scaling_sizes        - output array of custom sizes for --sizes
- *   scaling_size_count   - output, count of parsed sizes
- *   binary1, binary2     - output, paths to the two binaries
- *
- * Returns: 1 on success, 0 on validation failure.
- */
+/* Parse and validate all CLI flags and positional args. */
 static int parse_arguments(int argc,
                            char *argv[],
                            int *duration_seconds,
@@ -2191,19 +1763,7 @@ static int parse_arguments(int argc,
     return 1;
 }
 
-/*
- * main: program entry point.  Orchestrates the full benchmark workflow:
- *   1. Parse CLI arguments (or launch interactive demo menu).
- *   2. Validate that both binaries exist and required tools (perf,
- *      timeout, optionally taskset) are installed.
- *   3. Run benchmark passes for each binary with warm-up and cooldown.
- *   4. Print the performance comparison table, system context table,
- *      weighted verdict, and metric guide.
- *   5. Optionally run scaling (Big O) analysis if --scaling was given.
- *   6. Clean up temporary log files and exit.
- *
- * Returns: 0 on success, 1 on any failure.
- */
+/* Entry point: parse args, benchmark both binaries, print results, cleanup. */
 int main(int argc, char *argv[]) {
     int duration_seconds;
     int run_count;
